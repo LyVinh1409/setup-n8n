@@ -32,6 +32,14 @@ set -u
 # Prevent errors in a pipeline from being masked.
 set -o pipefail
 
+# === Modifications ===
+# 2025-12-17: Improvements applied
+# - Robust JWT decode (URL-safe base64 + padding)
+# - Cloudflared .deb selected by architecture (with fallback)
+# - Health checks use docker inspect and explicit HTTP status checks
+# - Safer backup file handling (handles spaces) and pre-update rollback
+# - Avoid hardcoded example hostname in success messages
+
 # === Helper Functions ===
 print_section() {
     echo -e "${BLUE}>>> $1${NC}"
@@ -188,20 +196,19 @@ get_new_config() {
     echo ""
     echo "🔍 Đang phân tích token..."
     
-    # Thử decode JWT token để lấy thông tin
+    # Thử decode JWT token để lấy thông tin (hỗ trợ URL-safe base64 và padding)
     TUNNEL_ID=""
     ACCOUNT_TAG=""
     TUNNEL_SECRET=""
-    
-    # Decode JWT payload (phần thứ 2)
+
     if command -v base64 >/dev/null 2>&1; then
-        TOKEN_PAYLOAD=$(echo "$CF_TOKEN" | cut -d'.' -f2)
-        # Thêm padding nếu cần
-        case $((${#TOKEN_PAYLOAD} % 4)) in
-            2) TOKEN_PAYLOAD="${TOKEN_PAYLOAD}==" ;;
-            3) TOKEN_PAYLOAD="${TOKEN_PAYLOAD}=" ;;
-        esac
-        
+        TOKEN_PAYLOAD=$(echo "$CF_TOKEN" | cut -d'.' -f2 || true)
+        # Convert URL-safe base64 to standard and add padding
+        TOKEN_PAYLOAD=$(printf '%s' "$TOKEN_PAYLOAD" | tr '_-' '/+')
+        while [ $(( ${#TOKEN_PAYLOAD} % 4 )) -ne 0 ]; do
+            TOKEN_PAYLOAD="${TOKEN_PAYLOAD}="
+        done
+
         DECODED=$(echo "$TOKEN_PAYLOAD" | base64 -d 2>/dev/null || echo "")
         if [ -n "$DECODED" ]; then
             TUNNEL_ID=$(echo "$DECODED" | grep -o '"t":"[^"]*"' | cut -d'"' -f4 2>/dev/null || echo "")
@@ -341,12 +348,14 @@ cleanup_old_backups() {
     print_section "Dọn dẹp backup cũ"
     
     if [ -d "$BACKUP_DIR" ]; then
-        BACKUP_COUNT=$(ls -1 "$BACKUP_DIR"/*.tar.gz 2>/dev/null | wc -l)
-        
+        # Find backups robustly (handle spaces/newlines in filenames)
+        mapfile -t backups < <(find "$BACKUP_DIR" -maxdepth 1 -type f -name '*.tar.gz' -print0 | xargs -0 -n1 ls -1t 2>/dev/null || true)
+        BACKUP_COUNT=${#backups[@]}
+
         # Giữ lại 10 backup gần nhất
         if [ $BACKUP_COUNT -gt 10 ]; then
             echo "🧹 Tìm thấy $BACKUP_COUNT backup, giữ lại 10 backup gần nhất..."
-            ls -t "$BACKUP_DIR"/*.tar.gz | tail -n +11 | while read old_backup; do
+            for old_backup in "${backups[@]:10}"; do
                 echo "  🗑️ Xóa: $(basename "$old_backup")"
                 rm -f "$old_backup"
                 # Xóa file info tương ứng
@@ -396,17 +405,20 @@ health_check() {
     
     while [ $attempt -le $max_attempts ]; do
         echo "🔍 Thử kết nối lần $attempt/$max_attempts..."
-        
-        # Kiểm tra container đang chạy
-        if ! docker compose -f "$DOCKER_COMPOSE_FILE" ps | grep -q "Up"; then
-            print_error "Container không chạy!"
+        # Kiểm tra container n8n bằng inspect (chính xác hơn)
+        cid=$(docker compose -f "$DOCKER_COMPOSE_FILE" ps -q n8n 2>/dev/null || true)
+        if [ -z "$cid" ] || [ "$(docker inspect -f '{{.State.Running}}' "$cid" 2>/dev/null || echo 'false')" != "true" ]; then
+            print_error "N8N container không chạy!"
             return 1
         fi
-        
-        # Kiểm tra port 5678
-        if curl -s -o /dev/null -w "%{http_code}" http://localhost:5678 | grep -q "200\|302\|401"; then
+
+        # Kiểm tra port 5678 (giao thức HTTP cục bộ)
+        status=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:5678 || echo "")
+        if [ "$status" = "200" ] || [ "$status" = "302" ] || [ "$status" = "401" ]; then
             print_success "N8N service đang hoạt động bình thường"
-            print_success "Truy cập: https://n8n.doanh.id.vn"
+            if [ -n "${CF_HOSTNAME:-}" ]; then
+                print_success "Truy cập: https://$CF_HOSTNAME"
+            fi
             return 0
         fi
         
@@ -433,18 +445,27 @@ rollback_backup() {
     fi
     
     echo "📋 Danh sách backup khả dụng:"
-    ls -lah "$BACKUP_DIR"/*.tar.gz | nl
+    # List backups sorted by time (most recent first), handle spaces safely
+    mapfile -t backups < <(find "$BACKUP_DIR" -maxdepth 1 -type f -name '*.tar.gz' -print0 | xargs -0 -n1 ls -1t 2>/dev/null || true)
+    if [ ${#backups[@]} -eq 0 ]; then
+        print_error "Không tìm thấy backup nào để rollback!"
+        return 1
+    fi
+    for i in "${!backups[@]}"; do
+        idx=$((i+1))
+        echo " $idx) $(basename "${backups[$i]}")"
+    done
     echo ""
-    
+
     read -p "Nhập số thứ tự backup muốn rollback (hoặc Enter để hủy): " backup_choice
-    
+
     if [ -z "$backup_choice" ]; then
         echo "Hủy rollback"
         return 0
     fi
-    
-    SELECTED_BACKUP=$(ls -t "$BACKUP_DIR"/*.tar.gz | sed -n "${backup_choice}p")
-    
+
+    SELECTED_BACKUP="${backups[$((backup_choice-1))]:-}"
+
     if [ -z "$SELECTED_BACKUP" ] || [ ! -f "$SELECTED_BACKUP" ]; then
         print_error "Backup không hợp lệ!"
         return 1
@@ -538,7 +559,8 @@ count_backups() {
     print_section "Thông báo đã backup bao nhiêu bản và mô tả chi tiết"
     
     if [ -d "$BACKUP_DIR" ]; then
-        BACKUP_COUNT=$(ls -1 "$BACKUP_DIR"/*.tar.gz 2>/dev/null | wc -l)
+        mapfile -t _backups < <(find "$BACKUP_DIR" -maxdepth 1 -type f -name '*.tar.gz' -print0 | xargs -0 -n1 ls -1t 2>/dev/null || true)
+        BACKUP_COUNT=${#_backups[@]}
         TOTAL_SIZE=$(du -sh "$BACKUP_DIR" 2>/dev/null | cut -f1)
         
         echo "📦 Số lượng backup hiện có: $BACKUP_COUNT bản"
@@ -547,8 +569,9 @@ count_backups() {
         
         if [ $BACKUP_COUNT -gt 0 ]; then
             echo "📋 Danh sách backup gần đây:"
-            ls -lah "$BACKUP_DIR"/*.tar.gz 2>/dev/null | tail -5 | while read line; do
-                echo "  $line"
+            # Print up to 5 most recent
+            for i in "${_backups[@]:0:5}"; do
+                echo "  $(ls -lah "$i" 2>/dev/null)"
             done
             echo ""
             
@@ -662,7 +685,12 @@ update_n8n() {
     
     echo "🔄 Đang pull image mới nhất từ Docker Hub..."
     docker compose -f "$DOCKER_COMPOSE_FILE" pull
-    
+    # Tạo snapshot trước khi update để có thể rollback tự động nếu cần
+    PRE_UPDATE_BACKUP="n8n_preupdate_$(date +%Y%m%d_%H%M%S).tar.gz"
+    mkdir -p "$BACKUP_DIR"
+    echo "💾 Tạo pre-update backup: $PRE_UPDATE_BACKUP"
+    tar -czf "$BACKUP_DIR/$PRE_UPDATE_BACKUP" -C "$(dirname "$N8N_BASE_DIR")" "$(basename "$N8N_BASE_DIR")" 2>/dev/null || true
+
     echo "🚀 Khởi động lại với phiên bản mới..."
     docker compose -f "$DOCKER_COMPOSE_FILE" up -d
     
@@ -685,6 +713,18 @@ update_n8n() {
         print_error "Có lỗi khi khởi động container!"
         echo "📋 Container logs:"
         docker compose -f "$DOCKER_COMPOSE_FILE" logs --tail=20
+        print_warning "Thực hiện rollback tự động từ backup trước update..."
+        # Thực hiện rollback từ PRE_UPDATE_BACKUP
+        docker compose -f "$DOCKER_COMPOSE_FILE" down || true
+        if [ -f "$BACKUP_DIR/$PRE_UPDATE_BACKUP" ]; then
+            echo "📦 Restore từ: $PRE_UPDATE_BACKUP"
+            cd "$(dirname "$N8N_BASE_DIR")"
+            tar -xzf "$BACKUP_DIR/$PRE_UPDATE_BACKUP"
+            docker compose -f "$DOCKER_COMPOSE_FILE" up -d
+            print_warning "Rollback hoàn tất. Vui lòng kiểm tra logs." 
+        else
+            print_error "Không tìm thấy pre-update backup để rollback: $PRE_UPDATE_BACKUP"
+        fi
         return 1
     fi
     echo ""
@@ -706,7 +746,9 @@ backup_and_update() {
     echo -e "${GREEN}================================================${NC}"
     print_success "Backup: $BACKUP_DIR/n8n_backup_${TIMESTAMP}.tar.gz"
     print_success "N8N đã được cập nhật và đang chạy"
-    print_success "Truy cập: https://n8n.doanh.id.vn"
+        if [ -n "${CF_HOSTNAME:-}" ]; then
+            print_success "Truy cập: https://$CF_HOSTNAME"
+        fi
 }
 
 # === Original Installation Functions ===
@@ -790,14 +832,26 @@ install_n8n() {
     # --- Install Cloudflared ---
     if ! command -v cloudflared &> /dev/null; then
         echo ">>> Cloudflared not found. Installing Cloudflared..."
-        # Download the ARM64 package
-        CLOUDFLARED_DEB_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64.deb"
-        CLOUDFLARED_DEB_PATH="/tmp/cloudflared-linux-arm64.deb"
+        # Choose package asset based on architecture
+        ARCH=$(dpkg --print-architecture 2>/dev/null || uname -m)
+        case "$ARCH" in
+            amd64|x86_64) ASSET="cloudflared-linux-amd64.deb" ;;
+            arm64|aarch64) ASSET="cloudflared-linux-arm64.deb" ;;
+            armhf|armv7l) ASSET="cloudflared-linux-armhf.deb" ;;
+            *) ASSET="cloudflared-linux-amd64.deb" ;;
+        esac
+        CLOUDFLARED_DEB_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/$ASSET"
+        CLOUDFLARED_DEB_PATH="$(mktemp)"
         echo ">>> Downloading Cloudflared package from $CLOUDFLARED_DEB_URL..."
-        wget -q "$CLOUDFLARED_DEB_URL" -O "$CLOUDFLARED_DEB_PATH"
+        if ! wget -q "$CLOUDFLARED_DEB_URL" -O "$CLOUDFLARED_DEB_PATH"; then
+            print_warning "Không tải được package cho kiến trúc $ARCH, thử asset amd64..."
+            ASSET="cloudflared-linux-amd64.deb"
+            CLOUDFLARED_DEB_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/$ASSET"
+            wget -q "$CLOUDFLARED_DEB_URL" -O "$CLOUDFLARED_DEB_PATH"
+        fi
         echo ">>> Installing Cloudflared package..."
-        dpkg -i "$CLOUDFLARED_DEB_PATH"
-        rm "$CLOUDFLARED_DEB_PATH" # Clean up downloaded file
+        dpkg -i "$CLOUDFLARED_DEB_PATH" || true
+        rm -f "$CLOUDFLARED_DEB_PATH" # Clean up downloaded file
         echo ">>> Cloudflared installed successfully."
     else
         echo ">>> Cloudflared is already installed."
