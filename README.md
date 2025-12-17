@@ -128,10 +128,10 @@ brew install curl wget git
 
 ```bash
 # Tải script
-wget https://raw.githubusercontent.com/ndoanh266/setup-n8n/main/n8n.sh
+wget https://raw.githubusercontent.com/LyVinh1409/setup-n8n/main/n8n.sh
 
 # Hoặc dùng curl
-curl -O https://raw.githubusercontent.com/ndoanh266/setup-n8n/main/n8n.sh
+curl -O https://raw.githubusercontent.com/LyVinh1409/setup-n8n/main/n8n.sh
 
 # Cấp quyền thực thi
 chmod +x n8n.sh
@@ -166,7 +166,7 @@ sudo ./n8n.sh
    sudo apt update && sudo apt upgrade -y
    
    # Tải và chạy script
-   wget https://raw.githubusercontent.com/ndoanh266/setup-n8n/main/n8n.sh
+   wget https://raw.githubusercontent.com/LyVinh1409/setup-n8n/main/n8n.sh
    chmod +x n8n.sh
    sudo ./n8n.sh
    ```
@@ -180,7 +180,7 @@ sudo ./n8n.sh
 3. **Chạy Git Bash với quyền Admin:**
    ```bash
    # Tải script
-   curl -O https://raw.githubusercontent.com/ndoanh266/setup-n8n/main/n8n.sh
+   curl -O https://raw.githubusercontent.com/LyVinh1409/setup-n8n/main/n8n.sh
    
    # Chạy script
    bash n8n.sh
@@ -203,7 +203,7 @@ open /Applications/Docker.app
 #### **Bước 3: Chạy script**
 ```bash
 # Tải script
-curl -O https://raw.githubusercontent.com/ndoanh266/setup-n8n/main/n8n.sh
+curl -O https://raw.githubusercontent.com/LyVinh1409/setup-n8n/main/n8n.sh
 chmod +x n8n.sh
 
 # Chạy script
@@ -217,7 +217,7 @@ sudo ./n8n.sh
 sudo apt update && sudo apt upgrade -y
 
 # Tải script
-wget https://raw.githubusercontent.com/ndoanh266/setup-n8n/main/n8n.sh
+wget https://raw.githubusercontent.com/LyVinh1409/setup-n8n/main/n8n.sh
 chmod +x n8n.sh
 
 # Chạy script
@@ -480,7 +480,7 @@ docker logs n8n
 
 ### 💬 **Thảo luận:**
 
-- [Discussions](https://github.com/ndoanh266/setup-n8n/discussions) - Hỏi đáp, chia sẻ kinh nghiệm
+- [Discussions](https://github.com/LyVinh1409/setup-n8n/discussions) - Hỏi đáp, chia sẻ kinh nghiệm
 - [Telegram Group](https://t.me/n8n_vietnam) - Cộng đồng N8N Việt Nam
 
 ---
@@ -518,5 +518,6 @@ Xem [CREDITS.md](CREDITS.md) để biết thêm chi tiết về:
 ---
 
 **Cảm ơn J2TEAM Community đã cho phép chia sẻ**
+
 
 > 🚀 **Bắt đầu automation journey của bạn ngay hôm nay!**
